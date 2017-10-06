@@ -8,7 +8,7 @@ import qualified Antidote.ApbCounterUpdate
 import qualified Antidote.ApbSetUpdate
 import qualified Antidote.ApbRegUpdate
 import qualified Antidote.ApbIntegerUpdate
-import qualified Antidote.ApbMapUpdate
+-- import qualified Antidote.ApbMapUpdate
 import qualified Antidote.ApbCrdtReset
 import qualified Antidote.ApbFlagUpdate
 
@@ -17,7 +17,7 @@ data ApbUpdateOperation = ApbUpdateOperation
   , setop :: !(PB.Maybe Antidote.ApbSetUpdate.ApbSetUpdate)
   , regop :: !(PB.Maybe Antidote.ApbRegUpdate.ApbRegUpdate)
   , integerop :: !(PB.Maybe Antidote.ApbIntegerUpdate.ApbIntegerUpdate)
-  , mapop :: !(PB.Maybe Antidote.ApbMapUpdate.ApbMapUpdate)
+  , mapop :: !(PB.Maybe Antidote.ApbCounterUpdate.ApbCounterUpdate) --Antidote.ApbMapUpdate.ApbMapUpdate)
   , resetop :: !(PB.Maybe Antidote.ApbCrdtReset.ApbCrdtReset)
   , flagop :: !(PB.Maybe Antidote.ApbFlagUpdate.ApbFlagUpdate)
   } deriving (PB.Show, PB.Eq, PB.Ord)
@@ -65,5 +65,3 @@ instance PB.WireMessage ApbUpdateOperation where
     PB.putMessageOpt (PB.WireTag 5 PB.LenDelim) (mapop self)
     PB.putMessageOpt (PB.WireTag 6 PB.LenDelim) (resetop self)
     PB.putMessageOpt (PB.WireTag 7 PB.LenDelim) (flagop self)
-
-

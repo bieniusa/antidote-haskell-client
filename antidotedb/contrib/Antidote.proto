@@ -93,7 +93,7 @@ message ApbGetIntegerResp {
 
 message ApbMapKey {
     required bytes key = 1;
-    required CRDT_type type = 2;
+    required CRDT_type typ = 2;
 }
 
 message ApbMapUpdate {
@@ -151,7 +151,7 @@ message ApbTxnProperties {
 // Object (Key) representation
 message ApbBoundObject {
     required bytes key = 1;
-    required CRDT_type type = 2;
+    required CRDT_type typ = 2;
     required bytes bucket = 3;
 }
 

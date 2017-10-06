@@ -9,7 +9,7 @@ import qualified Antidote.ApbGetSetResp
 import qualified Antidote.ApbGetRegResp
 import qualified Antidote.ApbGetMVRegResp
 import qualified Antidote.ApbGetIntegerResp
-import qualified Antidote.ApbGetMapResp
+--import qualified Antidote.ApbGetMapResp
 import qualified Antidote.ApbGetFlagResp
 
 data ApbReadObjectResp = ApbReadObjectResp
@@ -18,7 +18,7 @@ data ApbReadObjectResp = ApbReadObjectResp
   , reg :: !(PB.Maybe Antidote.ApbGetRegResp.ApbGetRegResp)
   , mvreg :: !(PB.Maybe Antidote.ApbGetMVRegResp.ApbGetMVRegResp)
   , int :: !(PB.Maybe Antidote.ApbGetIntegerResp.ApbGetIntegerResp)
-  , map :: !(PB.Maybe Antidote.ApbGetMapResp.ApbGetMapResp)
+  , map :: !(PB.Maybe Antidote.ApbGetCounterResp.ApbGetCounterResp)--Antidote.ApbGetMapResp.ApbGetMapResp)
   , flag :: !(PB.Maybe Antidote.ApbGetFlagResp.ApbGetFlagResp)
   } deriving (PB.Show, PB.Eq, PB.Ord)
 
@@ -65,5 +65,3 @@ instance PB.WireMessage ApbReadObjectResp where
     PB.putMessageOpt (PB.WireTag 5 PB.LenDelim) (int self)
     PB.putMessageOpt (PB.WireTag 6 PB.LenDelim) (map self)
     PB.putMessageOpt (PB.WireTag 7 PB.LenDelim) (flag self)
-
-
