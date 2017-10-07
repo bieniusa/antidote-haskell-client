@@ -20,6 +20,9 @@ import Antidote.ApbOperationResp
 import Antidote.ApbGetCounterResp
 import Antidote.ApbGetRegResp
 import Antidote.ApbRegUpdate
+import Antidote.SetOpType
+import Antidote.ApbGetSetResp
+import Antidote.ApbSetUpdate
 
 
 import Data.Proxy
@@ -34,10 +37,12 @@ import Data.Binary.Put as B
 import Data.Binary.Get as B
 import Control.Exception
 import Control.Monad
-import Control.Monad.Reader
+import Control.Monad.Reader hiding (mapM)
 import Data.Pool
-import System.IO.Streams
+import System.IO.Streams hiding (mapM)
 import Data.Kind
+import qualified Data.Foldable as F
+import qualified Data.Set as Set
 
 
 newtype Adb a = Adb { unAdb :: ReaderT AdbState IO a }
@@ -139,7 +144,7 @@ commitTxn (AdbConn _ inStream outStream) d = do
     Nothing -> fail "no txn descriptor provided"
     Just d -> return d
 
-data CrdtType = CrdtCounter | CrdtLwwReg Type
+data CrdtType = CrdtCounter | CrdtLwwReg Type | CrdtSet Type
 
 class SingCrdtType (t :: CrdtType) where
   singCrdtType :: sing t -> CRDT_type
@@ -150,6 +155,9 @@ instance SingCrdtType 'CrdtCounter where
 instance SingCrdtType ('CrdtLwwReg a) where
   singCrdtType _ = Lwwreg
 
+instance SingCrdtType ('CrdtSet a) where
+  singCrdtType _ = Orset
+
 data CRDT (t :: CrdtType) = CRDT !L.ByteString !L.ByteString
 
 counterCrdt :: L.ByteString -> L.ByteString -> CRDT 'CrdtCounter
@@ -157,6 +165,9 @@ counterCrdt = CRDT
 
 regCrdt :: Binary a => L.ByteString -> L.ByteString -> CRDT ('CrdtLwwReg a)
 regCrdt = CRDT
+
+setCrdt :: Binary a => L.ByteString -> L.ByteString -> CRDT ('CrdtSet a)
+setCrdt = CRDT
 
 class SingCrdtType t => IsCrdt (t :: CrdtType) where
   type CrdtRep t
@@ -187,12 +198,34 @@ instance Binary a => IsCrdt ('CrdtLwwReg a) where
   encodeUpdate (RegSet x) =
     defaultVal{regop = Just $ ApbRegUpdate $ B.encode x}
 
+instance (Binary a, Ord a) => IsCrdt ('CrdtSet a) where
+  type CrdtRep  ('CrdtSet a) = Set.Set a
+  data CrdtUpdate ('CrdtSet a) = SetAdd !a | SetRemove !a
+  decodeState _ resp =
+    case set resp of
+      Nothing -> fail "no orset"
+      Just c ->
+        let bss = F.toList (Antidote.ApbGetSetResp.value c)
+            dec bs = case decodeOrFail bs of
+                      Left (_, offset, msg) -> fail ("at " ++ show offset ++ ": " ++ msg)
+                      Right (_, _, a)       -> return a
+        in Set.fromList <$> mapM dec bss
+  encodeUpdate (SetAdd x) =
+    defaultVal{setop = Just $ ApbSetUpdate Add (S.singleton $ B.encode x) S.empty}
+  encodeUpdate (SetRemove x) =
+    defaultVal{setop = Just $ ApbSetUpdate Remove S.empty (S.singleton $ B.encode x)}
+
 incCounter :: Int -> CrdtUpdate 'CrdtCounter
 incCounter = CounterInc
 
 setReg :: a -> CrdtUpdate ('CrdtLwwReg a)
 setReg = RegSet
 
+addSet :: a -> CrdtUpdate ('CrdtSet a)
+addSet = SetAdd
+
+rmvSet :: a -> CrdtUpdate ('CrdtSet a)
+rmvSet = SetRemove
 
 -- TODO: Supports currently only one obj per read request
 readCrdt :: IsCrdt t => CRDT t -> Adb (CrdtRep t)
@@ -246,10 +279,18 @@ test
       do c <- runAdbTxn ctx $ do
                 updateCrdt obj (incCounter 1)
                 x <- readCrdt obj
-                updateCrdt robj (setReg x)
-                readCrdt robj
+                updateCrdt robj (setReg True)
+                y <- readCrdt robj
+                updateCrdt sobj (addSet True)
+                updateCrdt sobj (addSet True)
+                updateCrdt sobj (addSet False)
+                z1 <- readCrdt sobj
+                updateCrdt sobj (rmvSet False)
+                z2 <- readCrdt sobj
+                return (x,y,z1,z2)
          putStrLn (show c)
   where
     cfg = AdbConfig "127.0.0.1" 8087 3
     obj = counterCrdt "bucket" "x"
     robj = regCrdt "bucket" "y"
+    sobj = setCrdt "bucket" "z"
