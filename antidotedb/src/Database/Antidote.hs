@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings, KindSignatures, DataKinds, TypeFamilies #-}
-{-# LANGUAGE BangPatterns, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE BangPatterns, GeneralizedNewtypeDeriving, RecordWildCards #-}
 module Database.Antidote where
 
 import Antidote.ApbCounterUpdate
@@ -9,7 +9,7 @@ import Antidote.ApbTxnProperties
 import Antidote.ApbCommitResp
 import Antidote.ApbCommitTransaction
 import Antidote.ApbBoundObject
-import qualified Antidote.CRDT_type as A
+import Antidote.CRDT_type
 import Antidote.ApbReadObjects
 import Antidote.ApbUpdateOperation
 import Antidote.ApbUpdateOp
@@ -21,30 +21,57 @@ import qualified Data.Sequence as S
 import Data.ProtoBuf as P
 import Data.ProtoBufInt as P
 import Network.Simple.TCP
+import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 import Data.Binary as B
 import Data.Binary.Put as B
 import Data.Binary.Get as B
+import Control.Exception
+import Control.Monad
 import Control.Monad.Reader
+import Data.Pool
+import System.IO.Streams
 
 
-newtype Adb a = Adb { unAdb :: ReaderT AdbCtx IO a }
+newtype Adb a = Adb { unAdb :: ReaderT AdbState IO a }
   deriving (Functor, Applicative, Monad)
 
-data AdbCtx = AdbCtx !AdbConn !TxnDescriptor
+data AdbState = AdbState !AdbConn !TxnDescriptor
 type TxnDescriptor = L.ByteString
-data AdbConn = AdbConn !Socket
+newtype AdbCtx = AdbCtx (Pool AdbConn)
+data AdbConn = AdbConn !Socket !(InputStream B.ByteString) (OutputStream B.ByteString)
 
-data AdbConfig = AdbConfig { adbHostName :: !String, adbPort :: !Int }
+
+data AdbConfig = AdbConfig { adbHostName :: !String, adbPort :: !Int, adbConnectionLimit :: !Int }
   deriving (Eq, Show)
 
-withAdb :: AdbConfig -> (AdbConn -> IO a) -> IO a
-withAdb cfg f
-  = error "todo"
+withAdb :: AdbConfig -> (AdbCtx -> IO a) -> IO a
+withAdb (AdbConfig {..}) f
+  = bracket (createPool createConn destroyConn 1 120.0 adbConnectionLimit)
+            destroyAllResources
+            (f . AdbCtx)
+  where
+    createConn
+      = bracketOnError (connectSock adbHostName (show adbPort)) (closeSock . fst) $ \(sock, _) ->
+          do (inp, out) <- socketToStreams sock
+             return $ AdbConn sock inp out
 
-runAdbTxn :: AdbConn -> Adb a -> IO a
-runAdbTxn conn m
-  = error "todo"
+    destroyConn (AdbConn s _ _) = closeSock s
+
+runAdbTxn :: AdbCtx -> Adb a -> IO a
+runAdbTxn (AdbCtx pool) (Adb m)
+  = withResource pool $ \conn ->
+      do descr <- createTxn conn
+         let state = AdbState conn descr
+         a <- runReaderT m state
+         commitTxn conn
+         pure a
+
+createTxn :: AdbConn -> IO TxnDescriptor
+createTxn = error "todo"
+
+commitTxn :: AdbConn -> IO ()
+commitTxn = error "todo"
 
 data CrdtType = CrdtCounter
 
@@ -83,13 +110,13 @@ updateCrdt = error "todo"
 
 test2 :: IO ()
 test2
-  = withAdb cfg $ \conn ->
-      do c <- runAdbTxn conn $ do
+  = withAdb cfg $ \ctx ->
+      do c <- runAdbTxn ctx $ do
                 updateCrdt obj (incCounter 1)
                 readCrdt obj
          putStrLn (show c)
   where
-    cfg = AdbConfig "127.0.0.1" 8087
+    cfg = AdbConfig "127.0.0.1" 8087 3
     obj = counterCrdt "bucket" "x"
 
 -- TODO: Add optional dependecy information
@@ -105,7 +132,7 @@ commitTxnMsg d = buildMsg 121 $ P.encode $ ApbCommitTransaction d
 -- FIXME: CRDT type!!
 readMsg :: CRDT t -> TxnDescriptor -> L.ByteString
 readMsg (CRDT bucket key) d =
-  let bo = ApbBoundObject key A.Counter bucket
+  let bo = ApbBoundObject key Counter bucket
   in buildMsg 116 $ P.encode $ ApbReadObjects (S.singleton bo) $ d
 
 
@@ -118,7 +145,7 @@ buildMsg code bytes=
 
 test :: IO ()
 test = do
-  connect "127.0.0.1" "8087" $ \(s,_) -> do
+  Network.Simple.TCP.connect "127.0.0.1" "8087" $ \(s,_) -> do
     -- start txn
     sendLazy s $ startTxnMsg
     resp <- recv s 5
@@ -136,7 +163,7 @@ test = do
             let (Just d) = Antidote.ApbStartTransactionResp.transactionDescriptor answer
 
             -- inc counter
-            let bo = ApbBoundObject "key" A.Counter "bucket"
+            let bo = ApbBoundObject "key" Counter "bucket"
             let inc = ApbCounterUpdate (Just 1)
             let oper = defaultVal{counterop = Just inc}
             let op = ApbUpdateOp bo oper
@@ -154,7 +181,7 @@ test = do
 
             -- read counter
                 let bytesR = P.encode $ ApbReadObjects (S.singleton bo) $ d
-                sendLazy s $ buildMsg 116 bytesR 
+                sendLazy s $ buildMsg 116 bytesR
                 respR <- recv s 5
                 case respR of
                     Just bs -> do

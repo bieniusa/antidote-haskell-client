@@ -16,7 +16,8 @@ cabal-version:       >=1.10
 library
   hs-source-dirs:      src
   exposed-modules:     Database.Antidote
-  build-depends:       base >= 4.7 && < 5, protobuf-simple, bytestring, network-simple, binary, containers, mtl
+  build-depends:       base >= 4.7 && < 5, protobuf-simple, bytestring, network-simple, binary, containers, mtl,
+                       resource-pool, io-streams
   default-language:    Haskell2010
 
 source-repository head
