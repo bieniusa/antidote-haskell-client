@@ -17,6 +17,7 @@ import Antidote.ApbUpdateObjects
 import Antidote.ApbReadObjectsResp
 import Antidote.ApbReadObjectResp
 
+import Data.Proxy
 import qualified Data.Sequence as S
 import Data.ProtoBuf as P
 import Data.ProtoBufInt as P
@@ -64,14 +65,65 @@ runAdbTxn (AdbCtx pool) (Adb m)
       do descr <- createTxn conn
          let state = AdbState conn descr
          a <- runReaderT m state
-         commitTxn conn
+         commitTxn conn descr
          pure a
 
-createTxn :: AdbConn -> IO TxnDescriptor
-createTxn = error "todo"
+headerDecoder :: Word8 -> Get Int
+headerDecoder code
+  = do sizeB    <- B.getInt32be
+       codeRecv <- getWord8
+       if codeRecv /= code
+       then fail $ "bad code: " ++ show codeRecv ++ " length: " ++ show sizeB
+       else return $ fromIntegral sizeB
 
-commitTxn :: AdbConn -> IO ()
-commitTxn = error "todo"
+decodeHeader :: B.ByteString -> Word8 -> IO Int
+decodeHeader bs code
+  = case runGetOrFail (headerDecoder code) (L.fromStrict bs) of
+      Left (_, offset, msg) -> fail ("at " ++ show offset ++ ": " ++ msg)
+      Right (_, _, l)       -> return l
+
+class HasMessageCode a where
+  messageCode :: a -> Word8
+
+readResponse :: (Default a, Required a, WireMessage a, HasMessageCode a) =>
+  InputStream B.ByteString -> IO a
+readResponse = readResponse' defaultVal
+
+readResponse' :: (Default a, Required a, WireMessage a, HasMessageCode a) =>
+  a -> InputStream B.ByteString -> IO a
+readResponse' dflt inStream = do
+  hs  <- readExactly 5 inStream
+  putStrLn (show hs)
+  len <- decodeHeader hs $ messageCode dflt
+  putStrLn ("Read response header with len " ++ show len)
+  bs  <- readExactly (len - 1) inStream
+  putStrLn ("Read response content")
+  case P.decode $ L.fromStrict bs of
+    Left msg -> fail msg
+    Right a  -> return a
+
+writeRequest :: (WireMessage a, HasMessageCode a) =>
+  a -> OutputStream B.ByteString -> IO ()
+writeRequest a outStream = writeLazyByteString msg outStream where
+  msg = buildMsg (messageCode a) (P.encode a)
+
+createTxn :: AdbConn -> IO TxnDescriptor
+createTxn (AdbConn _ inStream outStream) = do
+  let props    = ApbTxnProperties Nothing Nothing
+      startTxn = ApbStartTransaction Nothing (Just props)
+  writeRequest startTxn outStream
+  resp <- readResponse inStream
+  case Antidote.ApbStartTransactionResp.transactionDescriptor resp of
+    Nothing -> fail "no txn descriptor provided"
+    Just d  -> return d
+
+commitTxn :: AdbConn -> TxnDescriptor -> IO TxnDescriptor
+commitTxn (AdbConn _ inStream outStream) d = do
+  writeRequest (ApbCommitTransaction d) outStream
+  resp <- readResponse inStream
+  case commitTime resp of
+    Nothing -> fail "no txn descriptor provided"
+    Just d -> return d
 
 data CrdtType = CrdtCounter
 
@@ -107,24 +159,34 @@ readCrdt = error "todo"
 updateCrdt :: IsCrdt t => CRDT t -> CrdtUpdate t -> Adb ()
 updateCrdt = error "todo"
 
+instance HasMessageCode ApbStartTransaction where
+  messageCode _ = 119
+instance HasMessageCode ApbStartTransactionResp where
+  messageCode _ = 124
+
+instance HasMessageCode ApbCommitTransaction where
+  messageCode _ = 121
+instance HasMessageCode ApbCommitResp where
+  messageCode _ = 127
+
+
 
 test2 :: IO ()
 test2
   = withAdb cfg $ \ctx ->
       do c <- runAdbTxn ctx $ do
-                updateCrdt obj (incCounter 1)
-                readCrdt obj
+                return ()
+                --updateCrdt obj (incCounter 1)
+                --readCrdt obj
          putStrLn (show c)
   where
     cfg = AdbConfig "127.0.0.1" 8087 3
     obj = counterCrdt "bucket" "x"
 
 -- TODO: Add optional dependecy information
-startTxnMsg :: L.ByteString
 startTxnMsg =
   let props = ApbTxnProperties Nothing Nothing
-      bytes = P.encode $ ApbStartTransaction Nothing (Just props)
-  in buildMsg 119 bytes
+  in ApbStartTransaction Nothing (Just props)
 
 commitTxnMsg :: TxnDescriptor -> L.ByteString
 commitTxnMsg d = buildMsg 121 $ P.encode $ ApbCommitTransaction d
@@ -147,7 +209,7 @@ test :: IO ()
 test = do
   Network.Simple.TCP.connect "127.0.0.1" "8087" $ \(s,_) -> do
     -- start txn
-    sendLazy s $ startTxnMsg
+    sendLazy s $ P.encode startTxnMsg
     resp <- recv s 5
     case resp of
       Just bs -> do
