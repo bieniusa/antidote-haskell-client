@@ -92,21 +92,35 @@ test2
     cfg = AdbConfig "127.0.0.1" 8087
     obj = counterCrdt "bucket" "x"
 
+-- TODO: Add optional dependecy information
+startTxnMsg :: L.ByteString
+startTxnMsg =
+  let props = ApbTxnProperties Nothing Nothing
+      bytes = P.encode $ ApbStartTransaction Nothing (Just props)
+  in buildMsg 119 bytes
+
+commitTxnMsg :: TxnDescriptor -> L.ByteString
+commitTxnMsg d = buildMsg 121 $ P.encode $ ApbCommitTransaction d
+
+-- FIXME: CRDT type!!
+readMsg :: CRDT t -> TxnDescriptor -> L.ByteString
+readMsg (CRDT bucket key) d =
+  let bo = ApbBoundObject key A.Counter bucket
+  in buildMsg 116 $ P.encode $ ApbReadObjects (S.singleton bo) $ d
 
 
-getHeader :: L.ByteString -> Word8 -> L.ByteString
-getHeader bytes code = runPut $ do
-     B.putInt32be $ fromIntegral $ L.length bytes + 1
-     B.putWord8 code
+buildMsg :: Word8 -> L.ByteString ->  L.ByteString
+buildMsg code bytes=
+  let header = runPut $ do
+      B.putInt32be $ fromIntegral $ L.length bytes + 1
+      B.putWord8 code
+  in L.append header bytes
 
 test :: IO ()
 test = do
   connect "127.0.0.1" "8087" $ \(s,_) -> do
     -- start txn
-    let props = ApbTxnProperties Nothing Nothing
-    let bytes = P.encode $ ApbStartTransaction Nothing (Just props)
-    let header = getHeader bytes 119
-    sendLazy s $ L.append header bytes
+    sendLazy s $ startTxnMsg
     resp <- recv s 5
     case resp of
       Just bs -> do
@@ -127,8 +141,7 @@ test = do
             let oper = defaultVal{counterop = Just inc}
             let op = ApbUpdateOp bo oper
             let bytesU = P.encode $ ApbUpdateObjects (S.singleton op) $ d
-            let headerU = getHeader bytesU 118
-            sendLazy s $ L.append headerU bytesU
+            sendLazy s $ buildMsg 118 bytesU
             respU <- recv s 5
             case respU of
               Just bs -> do
@@ -141,8 +154,7 @@ test = do
 
             -- read counter
                 let bytesR = P.encode $ ApbReadObjects (S.singleton bo) $ d
-                let headerR = getHeader bytesR 116
-                sendLazy s $ L.append headerR bytesR
+                sendLazy s $ buildMsg 116 bytesR 
                 respR <- recv s 5
                 case respR of
                     Just bs -> do
@@ -160,9 +172,7 @@ test = do
                           putStrLn $ show v
 
                           -- commit txn
-                          let bytesC = P.encode $ ApbCommitTransaction d
-                          let headerC = getHeader bytesC 121
-                          sendLazy s $ L.append headerC bytesC
+                          sendLazy s $ commitTxnMsg d
                           respC <- recv s 5   -- response code 127
                           case respC of
                             Just bs -> do
