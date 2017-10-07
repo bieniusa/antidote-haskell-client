@@ -18,6 +18,9 @@ import Antidote.ApbReadObjectsResp
 import Antidote.ApbReadObjectResp
 import Antidote.ApbOperationResp
 import Antidote.ApbGetCounterResp
+import Antidote.ApbGetRegResp
+import Antidote.ApbRegUpdate
+
 
 import Data.Proxy
 import qualified Data.Sequence as S
@@ -34,6 +37,7 @@ import Control.Monad
 import Control.Monad.Reader
 import Data.Pool
 import System.IO.Streams
+import Data.Kind
 
 
 newtype Adb a = Adb { unAdb :: ReaderT AdbState IO a }
@@ -135,7 +139,7 @@ commitTxn (AdbConn _ inStream outStream) d = do
     Nothing -> fail "no txn descriptor provided"
     Just d -> return d
 
-data CrdtType = CrdtCounter
+data CrdtType = CrdtCounter | CrdtLwwReg Type
 
 class SingCrdtType (t :: CrdtType) where
   singCrdtType :: sing t -> CRDT_type
@@ -143,10 +147,16 @@ class SingCrdtType (t :: CrdtType) where
 instance SingCrdtType 'CrdtCounter where
   singCrdtType _ = Counter
 
+instance SingCrdtType ('CrdtLwwReg a) where
+  singCrdtType _ = Lwwreg
+
 data CRDT (t :: CrdtType) = CRDT !L.ByteString !L.ByteString
 
 counterCrdt :: L.ByteString -> L.ByteString -> CRDT 'CrdtCounter
 counterCrdt = CRDT
+
+regCrdt :: Binary a => L.ByteString -> L.ByteString -> CRDT ('CrdtLwwReg a)
+regCrdt = CRDT
 
 class SingCrdtType t => IsCrdt (t :: CrdtType) where
   type CrdtRep t
@@ -160,12 +170,29 @@ instance IsCrdt 'CrdtCounter where
   decodeState _ resp =
     case counter resp of
       Nothing -> fail "no counter"
-      Just c -> return $ fromIntegral $ value c
+      Just c -> return $ fromIntegral $ Antidote.ApbGetCounterResp.value c
   encodeUpdate (CounterInc x) =
     defaultVal{counterop = Just $ ApbCounterUpdate $ Just $ fromIntegral x}
 
+instance Binary a => IsCrdt ('CrdtLwwReg a) where
+  type CrdtRep  ('CrdtLwwReg a) = a
+  data CrdtUpdate ('CrdtLwwReg a) = RegSet !a
+  decodeState _ resp =
+    case reg resp of
+      Nothing -> fail "no lwwreg"
+      Just c ->
+        case decodeOrFail (Antidote.ApbGetRegResp.value c) of
+          Left (_, offset, msg) -> fail ("at " ++ show offset ++ ": " ++ msg)
+          Right (_, _, a)       -> return a
+  encodeUpdate (RegSet x) =
+    defaultVal{regop = Just $ ApbRegUpdate $ B.encode x}
+
 incCounter :: Int -> CrdtUpdate 'CrdtCounter
 incCounter = CounterInc
+
+setReg :: a -> CrdtUpdate ('CrdtLwwReg a)
+setReg = RegSet
+
 
 -- TODO: Supports currently only one obj per read request
 readCrdt :: IsCrdt t => CRDT t -> Adb (CrdtRep t)
@@ -218,8 +245,11 @@ test
   = withAdb cfg $ \ctx ->
       do c <- runAdbTxn ctx $ do
                 updateCrdt obj (incCounter 1)
-                readCrdt obj
+                x <- readCrdt obj
+                updateCrdt robj (setReg x)
+                readCrdt robj
          putStrLn (show c)
   where
     cfg = AdbConfig "127.0.0.1" 8087 3
     obj = counterCrdt "bucket" "x"
+    robj = regCrdt "bucket" "y"
