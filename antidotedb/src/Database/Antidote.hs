@@ -16,6 +16,8 @@ import Antidote.ApbUpdateOp
 import Antidote.ApbUpdateObjects
 import Antidote.ApbReadObjectsResp
 import Antidote.ApbReadObjectResp
+import Antidote.ApbOperationResp
+import Antidote.ApbGetCounterResp
 
 import Data.Proxy
 import qualified Data.Sequence as S
@@ -107,6 +109,14 @@ writeRequest :: (WireMessage a, HasMessageCode a) =>
 writeRequest a outStream = writeLazyByteString msg outStream where
   msg = buildMsg (messageCode a) (P.encode a)
 
+  buildMsg :: Word8 -> L.ByteString ->  L.ByteString
+  buildMsg code bytes=
+    let header = runPut $ do
+        B.putInt32be $ fromIntegral $ L.length bytes + 1
+        B.putWord8 code
+    in L.append header bytes
+
+-- TODO: Add optional dependecy information
 createTxn :: AdbConn -> IO TxnDescriptor
 createTxn (AdbConn _ inStream outStream) = do
   let props    = ApbTxnProperties Nothing Nothing
@@ -128,10 +138,10 @@ commitTxn (AdbConn _ inStream outStream) d = do
 data CrdtType = CrdtCounter
 
 class SingCrdtType (t :: CrdtType) where
-  singCrdtType :: sing t -> CrdtType
+  singCrdtType :: sing t -> CRDT_type
 
 instance SingCrdtType 'CrdtCounter where
-  singCrdtType _ = CrdtCounter
+  singCrdtType _ = Counter
 
 data CRDT (t :: CrdtType) = CRDT !L.ByteString !L.ByteString
 
@@ -147,17 +157,41 @@ class SingCrdtType t => IsCrdt (t :: CrdtType) where
 instance IsCrdt 'CrdtCounter where
   type CrdtRep    'CrdtCounter = Int
   data CrdtUpdate 'CrdtCounter = CounterInc !Int
-  decodeState  = error "todo"
-  encodeUpdate = error "todo"
+  decodeState _ resp =
+    case counter resp of
+      Nothing -> fail "no counter"
+      Just c -> return $ fromIntegral $ value c
+  encodeUpdate (CounterInc x) =
+    defaultVal{counterop = Just $ ApbCounterUpdate $ Just $ fromIntegral x}
 
 incCounter :: Int -> CrdtUpdate 'CrdtCounter
 incCounter = CounterInc
 
+-- TODO: Supports currently only one obj per read request
 readCrdt :: IsCrdt t => CRDT t -> Adb (CrdtRep t)
-readCrdt = error "todo"
+readCrdt obj@(CRDT key bucket) = Adb $ do
+  AdbState (AdbConn _ inStream outStream) d <- ask
+  liftIO $ do
+    let typ = singCrdtType obj
+    let bo = ApbBoundObject key typ bucket
+    writeRequest (ApbReadObjects (S.singleton bo) d) outStream
+    resp <- readResponse inStream
+    case S.viewl (objects resp) of
+      (v S.:< _) -> case decodeState obj v of
+        Left msg -> fail msg
+        Right i -> return i
+      _ -> fail "no object in read response"
 
 updateCrdt :: IsCrdt t => CRDT t -> CrdtUpdate t -> Adb ()
-updateCrdt = error "todo"
+updateCrdt obj@(CRDT key bucket) upd = Adb $ do
+  AdbState (AdbConn _ inStream outStream) d <- ask
+  liftIO $ do
+    let typ = singCrdtType obj
+        bo = ApbBoundObject key typ bucket
+        op = ApbUpdateOp bo (encodeUpdate upd)
+    writeRequest (ApbUpdateObjects (S.singleton op) d) outStream
+    (ApbOperationResp _ _) <- readResponse inStream
+    return ()
 
 instance HasMessageCode ApbStartTransaction where
   messageCode _ = 119
@@ -169,106 +203,23 @@ instance HasMessageCode ApbCommitTransaction where
 instance HasMessageCode ApbCommitResp where
   messageCode _ = 127
 
+instance HasMessageCode ApbReadObjects where
+  messageCode _ = 116
+instance HasMessageCode ApbReadObjectsResp where
+  messageCode _ = 126
 
+instance HasMessageCode ApbUpdateObjects where
+  messageCode _ = 118
+instance HasMessageCode ApbOperationResp where
+  messageCode _ = 111
 
-test2 :: IO ()
-test2
+test :: IO ()
+test
   = withAdb cfg $ \ctx ->
       do c <- runAdbTxn ctx $ do
-                return ()
-                --updateCrdt obj (incCounter 1)
-                --readCrdt obj
+                updateCrdt obj (incCounter 1)
+                readCrdt obj
          putStrLn (show c)
   where
     cfg = AdbConfig "127.0.0.1" 8087 3
     obj = counterCrdt "bucket" "x"
-
--- TODO: Add optional dependecy information
-startTxnMsg =
-  let props = ApbTxnProperties Nothing Nothing
-  in ApbStartTransaction Nothing (Just props)
-
-commitTxnMsg :: TxnDescriptor -> L.ByteString
-commitTxnMsg d = buildMsg 121 $ P.encode $ ApbCommitTransaction d
-
--- FIXME: CRDT type!!
-readMsg :: CRDT t -> TxnDescriptor -> L.ByteString
-readMsg (CRDT bucket key) d =
-  let bo = ApbBoundObject key Counter bucket
-  in buildMsg 116 $ P.encode $ ApbReadObjects (S.singleton bo) $ d
-
-
-buildMsg :: Word8 -> L.ByteString ->  L.ByteString
-buildMsg code bytes=
-  let header = runPut $ do
-      B.putInt32be $ fromIntegral $ L.length bytes + 1
-      B.putWord8 code
-  in L.append header bytes
-
-test :: IO ()
-test = do
-  Network.Simple.TCP.connect "127.0.0.1" "8087" $ \(s,_) -> do
-    -- start txn
-    sendLazy s $ P.encode startTxnMsg
-    resp <- recv s 5
-    case resp of
-      Just bs -> do
-        let g = do
-            laenge <- B.getInt32be
-            code   <- getWord8 -- 124
-            if code /= 124 then fail $ "bad code: " ++ show code ++ " length: " ++ show laenge else return laenge
-        let laenge = runGet g $ L.fromStrict bs
-        content <- recv s $ fromIntegral laenge
-        case content of
-          Just c -> do -- ToDo: Error handling
-            let (Right answer) = P.decode $ L.fromStrict c
-            let (Just d) = Antidote.ApbStartTransactionResp.transactionDescriptor answer
-
-            -- inc counter
-            let bo = ApbBoundObject "key" Counter "bucket"
-            let inc = ApbCounterUpdate (Just 1)
-            let oper = defaultVal{counterop = Just inc}
-            let op = ApbUpdateOp bo oper
-            let bytesU = P.encode $ ApbUpdateObjects (S.singleton op) $ d
-            sendLazy s $ buildMsg 118 bytesU
-            respU <- recv s 5
-            case respU of
-              Just bs -> do
-                let g = do
-                    laenge <- B.getInt32be
-                    code   <- getWord8
-                    if code /= 111 then fail $ "bad code: " ++ show code ++ " length: " ++ show laenge else return laenge
-                let laenge = runGet g $ L.fromStrict bs
-                content <- recv s $ fromIntegral laenge
-
-            -- read counter
-                let bytesR = P.encode $ ApbReadObjects (S.singleton bo) $ d
-                sendLazy s $ buildMsg 116 bytesR
-                respR <- recv s 5
-                case respR of
-                    Just bs -> do
-                      let g = do
-                          laenge <- B.getInt32be
-                          code   <- getWord8
-                          if code /= 126 then fail $ "bad code: " ++ show code ++ " length: " ++ show laenge else return laenge
-                      let laenge = runGet g $ L.fromStrict bs
-                      content <- recv s $ fromIntegral laenge
-                      case content of
-                        Just c -> do -- ToDo: Error handling
-                          let (Right answer) = P.decode $ L.fromStrict c
-                          let val = objects answer
-                          let (v S.:< _) = S.viewl val
-                          putStrLn $ show v
-
-                          -- commit txn
-                          sendLazy s $ commitTxnMsg d
-                          respC <- recv s 5   -- response code 127
-                          case respC of
-                            Just bs -> do
-                              let g = do
-                                  laenge <- B.getInt32be
-                                  code   <- getWord8 -- 124
-                                  if code /= 127 then fail $ "bad code: " ++ show code ++ " length: " ++ show laenge else return laenge
-                              let laenge = runGet g $ L.fromStrict bs
-                              content <- recv s $ fromIntegral laenge
-                              return ()
