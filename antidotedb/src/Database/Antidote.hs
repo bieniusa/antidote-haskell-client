@@ -23,7 +23,10 @@ import Antidote.ApbRegUpdate
 import Antidote.SetOpType
 import Antidote.ApbGetSetResp
 import Antidote.ApbSetUpdate
-
+import Antidote.ApbMapUpdate
+import Antidote.ApbMapNestedUpdate
+import Antidote.ApbMapKey
+import Antidote.ApbMapEntry
 
 import Data.Proxy
 import qualified Data.Sequence as S
@@ -43,7 +46,7 @@ import System.IO.Streams hiding (mapM)
 import Data.Kind
 import qualified Data.Foldable as F
 import qualified Data.Set as Set
-
+import qualified Data.Map as Map
 
 newtype Adb a = Adb { unAdb :: ReaderT AdbState IO a }
   deriving (Functor, Applicative, Monad)
@@ -144,7 +147,7 @@ commitTxn (AdbConn _ inStream outStream) d = do
     Nothing -> fail "no txn descriptor provided"
     Just d -> return d
 
-data CrdtType = CrdtCounter | CrdtLwwReg Type | CrdtSet Type
+data CrdtType = CrdtCounter | CrdtLwwReg Type | CrdtSet Type | CrdtMap
 
 class SingCrdtType (t :: CrdtType) where
   singCrdtType :: sing t -> CRDT_type
@@ -158,6 +161,9 @@ instance SingCrdtType ('CrdtLwwReg a) where
 instance SingCrdtType ('CrdtSet a) where
   singCrdtType _ = Orset
 
+instance SingCrdtType 'CrdtMap where
+  singCrdtType _ = Rrmap
+
 data CRDT (t :: CrdtType) = CRDT !L.ByteString !L.ByteString
 
 counterCrdt :: L.ByteString -> L.ByteString -> CRDT 'CrdtCounter
@@ -168,6 +174,9 @@ regCrdt = CRDT
 
 setCrdt :: Binary a => L.ByteString -> L.ByteString -> CRDT ('CrdtSet a)
 setCrdt = CRDT
+
+mapCrdt :: L.ByteString -> L.ByteString -> CRDT 'CrdtMap
+mapCrdt = CRDT
 
 class SingCrdtType t => IsCrdt (t :: CrdtType) where
   type CrdtRep t
@@ -214,6 +223,24 @@ instance (Binary a, Ord a) => IsCrdt ('CrdtSet a) where
     defaultVal{setop = Just $ ApbSetUpdate Add (S.singleton $ B.encode x) S.empty}
   encodeUpdate (SetRemove x) =
     defaultVal{setop = Just $ ApbSetUpdate Remove S.empty (S.singleton $ B.encode x)}
+
+type Key = B.ByteString
+data NestedUpdate = NestedUpdate Key 'CrdtUpdate
+
+instance IsCrdt 'CrdtMap where
+  type CrdtRep 'CrdtMap = ???
+  data CrdtUpdate 'CrdtMap = RemoveKey Key | UpdateKey Key NestedUpdate
+  decodeState _ resp =
+    case map resp of
+      Nothing -> fail "no map"
+      Just c ->
+      
+
+  encodeUpdate (RemoveKey x) = error "not yet implemented"
+  encodeUpdate (UpdateKey x upd) = error "not yet implemented"
+
+
+
 
 incCounter :: Int -> CrdtUpdate 'CrdtCounter
 incCounter = CounterInc
@@ -286,6 +313,8 @@ test
                 updateCrdt sobj (addSet False)
                 z1 <- readCrdt sobj
                 updateCrdt sobj (rmvSet False)
+                updateCrdt sobj (rmvSet True)
+
                 z2 <- readCrdt sobj
                 return (x,y,z1,z2)
          putStrLn (show c)
